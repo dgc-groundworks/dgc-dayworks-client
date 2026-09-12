@@ -15,7 +15,7 @@ Durable copy of everything needed to deploy or redeploy the public Dandara-facin
 
 This is the one server-side piece that lets the public site show only approved hours, without ever giving the public page a key that can read the raw table. Deploy via Supabase Dashboard → Edge Functions → Deploy new function → name it exactly `dayworks-client-data` → paste the code below → Deploy. No CLI needed.
 
-Status as of 12 Sept 2026: **not yet deployed** (site shows "Couldn't load hours" until this is done).
+Status as of 12 Sept 2026: **not yet deployed** (site shows "Couldn't load hours" until this is done). This version (updated 12 Sept) fixes a real bug in the first draft — it was returning the database's raw column names (`staff_name`, `work_date`, `start_time`...) but the page's JavaScript expects short names (`name`, `date`, `start`...), so the very first deploy would have shown blank names/dates/photos everywhere even once live. This version also adds `totalPaid`, used for the three totals on the page (due / paid / all-time).
 
 ```typescript
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -52,7 +52,36 @@ Deno.serve(async (req) => {
     })
   }
 
-  return new Response(JSON.stringify({ entries: data }), {
+  // Map raw DB column names to the short names the public page's JS
+  // expects, and turn image_path into a full public storage URL.
+  const STORAGE_PUBLIC = Deno.env.get('SUPABASE_URL') + '/storage/v1/object/public/dayworks-timesheets/'
+  const entries = (data || []).map(r => ({
+    id: r.id,
+    name: r.staff_name,
+    date: r.work_date,
+    site: r.site,
+    description: r.description,
+    start: r.start_time,
+    finish: r.finish_time,
+    hours: r.hours,
+    image: r.image_path ? STORAGE_PUBLIC + r.image_path : null,
+    approvedBy: r.approved_by,
+    approvedAt: r.approved_at,
+  }))
+
+  // Total paid so far — from a separate table Ash logs each Dandara
+  // payment certificate into (see the SQL below). That table may not
+  // exist yet, so a missing-table error here just means "no payments
+  // logged yet" rather than failing the whole request.
+  let totalPaid = 0
+  const { data: payments, error: payErr } = await supabase
+    .from('dgc_dayworks_payments')
+    .select('amount')
+  if (!payErr && payments) {
+    totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
+  }
+
+  return new Response(JSON.stringify({ entries, totalPaid }), {
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   })
 })
@@ -60,10 +89,31 @@ Deno.serve(async (req) => {
 
 **After deploying**, the public page will still show £0.00 until at least one batch has been through "Save for client" in the internal Job Planner (that's the step that stamps `approved_by` and `sent_at` on entries — the Edge Function only returns rows where both are set).
 
+## New table needed: `dgc_dayworks_payments`
+
+Backs the "Total paid so far" figure on the public page. Run this once in the Job Planner's Supabase SQL Editor:
+
+```sql
+create table if not exists public.dgc_dayworks_payments (
+  id uuid primary key default gen_random_uuid(),
+  amount numeric(10,2) not null,
+  paid_date date not null,
+  certificate_ref text,
+  note text,
+  created_at timestamptz default now()
+);
+alter table public.dgc_dayworks_payments enable row level security;
+create policy "anon read payments" on public.dgc_dayworks_payments for select using (true);
+create policy "anon insert payments" on public.dgc_dayworks_payments for insert with check (true);
+```
+
+Once that's run, Ash tells Claude about each Dandara payment certificate as it arrives (amount, date, certificate ref) and it gets added as a row here — no UI for this yet, it's a straight insert.
+
 ## Database pieces this depends on (already done, confirmed live)
 
 - `dgc_dayworks_entries` has `approved_by text`, `approved_at timestamptz`, `removed_at timestamptz`, `removed_note text` columns — confirmed present.
 - `dgc_dayworks_queries` table exists (client-side "Query these hours" writes here) — confirmed present.
+- `dgc_dayworks_payments` — **not yet created**, see SQL above.
 
 ## Client-side "Query" feature
 

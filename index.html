@@ -27,10 +27,13 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .brief{background:var(--surf);border:1px solid var(--bord);border-radius:12px;padding:22px 26px;margin-bottom:26px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
 .brief h1{font-size:1.25rem;font-weight:800;color:var(--navy);margin-bottom:8px}
 .brief p{color:var(--muted);line-height:1.6;font-size:0.9rem;max-width:640px}
-.brief .brief-total{margin-top:16px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-.brief .brief-total .bt-label{font-size:0.78rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700}
-.brief .brief-total .bt-amount{font-size:1.6rem;font-weight:900;color:var(--navy)}
-.brief .brief-meta{font-size:0.76rem;color:var(--muted);margin-top:10px}
+.brief .brief-totals{margin-top:16px;display:flex;gap:30px;flex-wrap:wrap}
+.brief .bt-block{display:flex;flex-direction:column;gap:3px}
+.brief .bt-label{font-size:0.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700}
+.brief .bt-amount{font-size:1.5rem;font-weight:900;color:var(--navy)}
+.brief .bt-amount-due{color:var(--accent)}
+.brief .bt-sub{color:var(--muted);font-size:0.78rem}
+.brief .brief-meta{font-size:0.76rem;color:var(--muted);margin-top:14px}
 
 .crumb{display:flex;align-items:center;gap:8px;margin-bottom:16px;font-size:0.85rem;color:var(--muted)}
 .crumb button{background:none;border:none;color:var(--navy);font-weight:700;cursor:pointer;font-family:inherit;font-size:0.85rem;padding:0}
@@ -151,6 +154,7 @@ function jobDescription(site) {
 }
 
 let entries = [];
+let totalPaid = 0;
 let state = { job: null, name: null, weekIndex: 0 };
 
 async function loadEntries() {
@@ -158,6 +162,7 @@ async function loadEntries() {
   if (!r.ok) throw new Error(await r.text());
   const data = await r.json();
   entries = (data.rows || data.entries || []);
+  totalPaid = data.totalPaid || 0;
 }
 
 function render() {
@@ -168,18 +173,30 @@ function render() {
 }
 
 function briefHtml() {
-  const total = entries.reduce((s, e) => s + (e.hours || 0), 0);
-  const amount = total * RATE;
+  const allTimeHours = entries.reduce((s, e) => s + (e.hours || 0), 0);
+  const allTimeAmount = allTimeHours * RATE;
+  const dueAmount = Math.max(0, allTimeAmount - totalPaid);
   const dates = entries.map(e => e.date).filter(Boolean).sort();
   const latest = dates.length ? fmtDate(dates[dates.length - 1]) : '—';
+  const todayStr = fmtDate(new Date().toISOString().slice(0, 10));
   return `
     <div class="brief">
       <h1>Dayworks Hours — Ballasalla &amp; Quay West</h1>
       <p>This page shows dayworks hours approved by Drainage &amp; Groundwork Contractors Ltd, ready for your review. It updates automatically as new weeks are approved — no need to check back on a schedule, we'll let you know by email when there's something new to see. Every entry can be checked against the original signed timesheet alongside it. If anything looks wrong, use the Query button next to that entry and we'll get back to you.</p>
-      <div class="brief-total">
-        <span class="bt-label">Total to date</span>
-        <span class="bt-amount">${fmtMoney(amount)}</span>
-        <span style="color:var(--muted);font-size:0.85rem">(${total} hours &times; ${fmtMoney(RATE)}/hr)</span>
+      <div class="brief-totals">
+        <div class="bt-block">
+          <span class="bt-label">Total due, as of ${todayStr}</span>
+          <span class="bt-amount bt-amount-due">${fmtMoney(dueAmount)}</span>
+        </div>
+        <div class="bt-block">
+          <span class="bt-label">Total paid so far</span>
+          <span class="bt-amount">${fmtMoney(totalPaid)}</span>
+        </div>
+        <div class="bt-block">
+          <span class="bt-label">Total, all time</span>
+          <span class="bt-amount">${fmtMoney(allTimeAmount)}</span>
+          <span class="bt-sub">${allTimeHours} hours &times; ${fmtMoney(RATE)}/hr</span>
+        </div>
       </div>
       <div class="brief-meta">Most recent approved date: ${latest} &middot; Ground Worker rate: ${fmtMoney(RATE)}/hr</div>
     </div>`;
