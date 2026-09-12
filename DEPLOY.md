@@ -50,15 +50,31 @@ Deno.serve(async (req) => {
 
     const supabase = createClient(url, key)
 
-    const { data, error } = await supabase
+    // billed_hours may not exist yet (added after this function's first
+    // version) — try with it, and if that specific column is the problem,
+    // fall back to a query without it rather than failing the whole page.
+    let data, error
+    ;({ data, error } = await supabase
       .from('dgc_dayworks_entries')
-      .select('id, staff_name, work_date, site, description, start_time, finish_time, hours, image_path, approved_by, approved_at')
+      .select('id, staff_name, work_date, site, description, start_time, finish_time, hours, billed_hours, image_path, approved_by, approved_at')
       .not('sent_at', 'is', null)
       .not('approved_by', 'is', null)
       .eq('confirmed', true)
       .eq('flagged', false)
       .is('removed_at', null)
-      .order('work_date', { ascending: true })
+      .order('work_date', { ascending: true }))
+
+    if (error && /billed_hours/i.test(error.message || '')) {
+      ;({ data, error } = await supabase
+        .from('dgc_dayworks_entries')
+        .select('id, staff_name, work_date, site, description, start_time, finish_time, hours, image_path, approved_by, approved_at')
+        .not('sent_at', 'is', null)
+        .not('approved_by', 'is', null)
+        .eq('confirmed', true)
+        .eq('flagged', false)
+        .is('removed_at', null)
+        .order('work_date', { ascending: true }))
+    }
 
     if (error) {
       return new Response(JSON.stringify({ error: error.message, stage: 'entries query' }), {
@@ -68,7 +84,10 @@ Deno.serve(async (req) => {
     }
 
     // Map raw DB column names to the short names the public page's JS
-    // expects, and turn image_path into a full public storage URL.
+    // expects, and turn image_path into a full public storage URL. Where
+    // a PM has overridden the billed hours (a double entry zeroed out, a
+    // few hours knocked off, etc.), that overridden figure is what the
+    // client sees — never the raw calculated hours underneath it.
     const STORAGE_PUBLIC = url + '/storage/v1/object/public/dayworks-timesheets/'
     const entries = (data || []).map(r => ({
       id: r.id,
@@ -78,7 +97,7 @@ Deno.serve(async (req) => {
       description: r.description,
       start: r.start_time,
       finish: r.finish_time,
-      hours: r.hours,
+      hours: (r.billed_hours !== null && r.billed_hours !== undefined) ? r.billed_hours : r.hours,
       image: r.image_path ? STORAGE_PUBLIC + r.image_path : null,
       approvedBy: r.approved_by,
       approvedAt: r.approved_at,
@@ -135,6 +154,7 @@ Once that's run, Ash tells Claude about each Dandara payment certificate as it a
 - `dgc_dayworks_entries` has `approved_by text`, `approved_at timestamptz`, `removed_at timestamptz`, `removed_note text` columns — confirmed present.
 - `dgc_dayworks_queries` table exists (client-side "Query these hours" writes here) — confirmed present.
 - `dgc_dayworks_payments` — **not yet created**, see SQL above.
+- `dgc_dayworks_entries.billed_hours` / `billed_hours_reason` — **not yet created**, needed for a PM's hours override (see the internal Job Planner's own banner for this SQL) to actually reach the public site. The Edge Function above degrades gracefully without it (just won't show any overridden figures), so this one isn't urgent to run before the others.
 
 ## Client-side "Query" feature
 
