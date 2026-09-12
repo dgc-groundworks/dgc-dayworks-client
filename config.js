@@ -5,4 +5,4 @@
 // Edge Function instead, which filters server-side with the service-role
 // key before anything reaches this page.
 const SUPABASE_URL = 'https://vigdtpcgeqenznuakdwz.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZpZ2R0cGNnZXFlbnpudWFrZHd6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc0MTI1MzQsImV4cCI6MjEwMjk4ODUzNH0.9hjdS6ATFVaYwwKcZQqTpQxbIuSDrxbO07r4MmXXadQ';
+const SUPABASE_KEY = 'sb_publishable_nUG65QtsU2p1-hWpdUuaSQ_bF4G1EGQ';

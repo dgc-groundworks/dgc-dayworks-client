@@ -15,7 +15,7 @@ Durable copy of everything needed to deploy or redeploy the public Dandara-facin
 
 This is the one server-side piece that lets the public site show only approved hours, without ever giving the public page a key that can read the raw table. Deploy via Supabase Dashboard → Edge Functions → Deploy new function → name it exactly `dayworks-client-data` → paste the code below → Deploy. No CLI needed.
 
-Status as of 12 Sept 2026: **not yet deployed** (site shows "Couldn't load hours" until this is done). This version (updated 12 Sept) fixes a real bug in the first draft — it was returning the database's raw column names (`staff_name`, `work_date`, `start_time`...) but the page's JavaScript expects short names (`name`, `date`, `start`...), so the very first deploy would have shown blank names/dates/photos everywhere even once live. This version also adds `totalPaid`, used for the three totals on the page (due / paid / all-time).
+Status as of 12 Sept 2026: **deployed, but still broken** — first it was returning raw DB column names instead of what the page expects (fixed below), then the project's Edge Functions gateway started rejecting the old-style anon key entirely (`INVALID_API_KEY` — this project now requires the newer `sb_publishable_...`/`sb_secret_...` key format; `config.js` is now fixed to use the working publishable key already live for this same project: `sb_publishable_nUG65QtsU2p1-hWpdUuaSQ_bF4G1EGQ`). With that fixed, the function itself returned a bare 500 with no detail. This version wraps everything in error handling so any failure comes back as real JSON explaining what broke, instead of an opaque "Internal Server Error" — redeploy with this version and whatever's still wrong should be visible directly in the browser/response rather than needing the Supabase dashboard's function logs.
 
 ```typescript
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -30,60 +30,81 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders })
   }
 
-  const supabase = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-  )
+  try {
+    const url = Deno.env.get('SUPABASE_URL')
+    // Try every name Supabase might inject the server-side key under —
+    // the platform's rename from "service_role" to "secret" key means
+    // the env var name isn't fully certain from here.
+    const key =
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ||
+      Deno.env.get('SUPABASE_SECRET_KEY') ||
+      Deno.env.get('SB_SECRET_KEY')
 
-  const { data, error } = await supabase
-    .from('dgc_dayworks_entries')
-    .select('id, staff_name, work_date, site, description, start_time, finish_time, hours, image_path, approved_by, approved_at')
-    .not('sent_at', 'is', null)
-    .not('approved_by', 'is', null)
-    .eq('confirmed', true)
-    .eq('flagged', false)
-    .is('removed_at', null)
-    .order('work_date', { ascending: true })
+    if (!url || !key) {
+      return new Response(JSON.stringify({
+        error: 'Missing Supabase credentials in the function environment',
+        haveUrl: !!url,
+        haveKey: !!key,
+      }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    }
 
-  if (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
+    const supabase = createClient(url, key)
+
+    const { data, error } = await supabase
+      .from('dgc_dayworks_entries')
+      .select('id, staff_name, work_date, site, description, start_time, finish_time, hours, image_path, approved_by, approved_at')
+      .not('sent_at', 'is', null)
+      .not('approved_by', 'is', null)
+      .eq('confirmed', true)
+      .eq('flagged', false)
+      .is('removed_at', null)
+      .order('work_date', { ascending: true })
+
+    if (error) {
+      return new Response(JSON.stringify({ error: error.message, stage: 'entries query' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    // Map raw DB column names to the short names the public page's JS
+    // expects, and turn image_path into a full public storage URL.
+    const STORAGE_PUBLIC = url + '/storage/v1/object/public/dayworks-timesheets/'
+    const entries = (data || []).map(r => ({
+      id: r.id,
+      name: r.staff_name,
+      date: r.work_date,
+      site: r.site,
+      description: r.description,
+      start: r.start_time,
+      finish: r.finish_time,
+      hours: r.hours,
+      image: r.image_path ? STORAGE_PUBLIC + r.image_path : null,
+      approvedBy: r.approved_by,
+      approvedAt: r.approved_at,
+    }))
+
+    // Total paid so far — from a separate table Ash logs each Dandara
+    // payment certificate into (see the SQL below). That table may not
+    // exist yet, so a missing-table error here just means "no payments
+    // logged yet" rather than failing the whole request.
+    let totalPaid = 0
+    const { data: payments, error: payErr } = await supabase
+      .from('dgc_dayworks_payments')
+      .select('amount')
+    if (!payErr && payments) {
+      totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
+    }
+
+    return new Response(JSON.stringify({ entries, totalPaid }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  } catch (err) {
+    return new Response(JSON.stringify({ error: String((err && err.message) || err), stage: 'unhandled' }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   }
-
-  // Map raw DB column names to the short names the public page's JS
-  // expects, and turn image_path into a full public storage URL.
-  const STORAGE_PUBLIC = Deno.env.get('SUPABASE_URL') + '/storage/v1/object/public/dayworks-timesheets/'
-  const entries = (data || []).map(r => ({
-    id: r.id,
-    name: r.staff_name,
-    date: r.work_date,
-    site: r.site,
-    description: r.description,
-    start: r.start_time,
-    finish: r.finish_time,
-    hours: r.hours,
-    image: r.image_path ? STORAGE_PUBLIC + r.image_path : null,
-    approvedBy: r.approved_by,
-    approvedAt: r.approved_at,
-  }))
-
-  // Total paid so far — from a separate table Ash logs each Dandara
-  // payment certificate into (see the SQL below). That table may not
-  // exist yet, so a missing-table error here just means "no payments
-  // logged yet" rather than failing the whole request.
-  let totalPaid = 0
-  const { data: payments, error: payErr } = await supabase
-    .from('dgc_dayworks_payments')
-    .select('amount')
-  if (!payErr && payments) {
-    totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
-  }
-
-  return new Response(JSON.stringify({ entries, totalPaid }), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  })
 })
 ```
 
