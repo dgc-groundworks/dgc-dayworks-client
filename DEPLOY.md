@@ -129,6 +129,118 @@ Deno.serve(async (req) => {
 
 **After deploying**, the public page will still show £0.00 until at least one batch has been through "Save for client" in the internal Job Planner (that's the step that stamps `approved_by` and `sent_at` on entries — the Edge Function only returns rows where both are set).
 
+## Edge Function: `dayworks-read-photo` (internal Job Planner only — not the public site)
+
+This is what "Re-read from photo" on a day-card in the internal Dayworks app (`dgc-ballasalla/planner/dayworks.html`) calls. It sends the timesheet photo plus which weekday row to look at to Claude, and gets back a structured best-effort reading (start/finish/description) for the PM to check against the photo — it never auto-saves or auto-confirms anything itself.
+
+Deploy the same way as `dayworks-client-data`: Supabase Dashboard → Edge Functions → Deploy new function → name it exactly `dayworks-read-photo` → paste the code below → Deploy.
+
+**Needs one extra step the other function doesn't**: this one calls the Anthropic API, so it needs your Anthropic API key set as a secret (not in the code — code is visible to anyone who can see the function, secrets aren't). In the Supabase Dashboard: Edge Functions → Manage secrets (or Project Settings → Edge Functions) → add a secret named `ANTHROPIC_API_KEY` with your key as the value. Your key is saved in Obsidian under `Tech & Apps/Integrations & API Keys.md` (Anthropic API section) if you need to find it again — not repeating the value here.
+
+```typescript
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+
+  try {
+    const { imagePath, weekday } = await req.json()
+    if (!imagePath || !weekday) {
+      return new Response(JSON.stringify({ ok: false, error: 'imagePath and weekday are both required' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY')
+    if (!anthropicKey) {
+      return new Response(JSON.stringify({ ok: false, error: 'ANTHROPIC_API_KEY is not set as a secret on this function yet' }), {
+        status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')
+    const imgUrl = `${supabaseUrl}/storage/v1/object/public/dayworks-timesheets/${imagePath}`
+    const imgResp = await fetch(imgUrl)
+    if (!imgResp.ok) {
+      return new Response(JSON.stringify({ ok: false, error: 'Could not fetch that photo from storage' }), {
+        status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+    const imgBuf = new Uint8Array(await imgResp.arrayBuffer())
+    let binary = ''
+    for (let i = 0; i < imgBuf.length; i++) binary += String.fromCharCode(imgBuf[i])
+    const base64 = btoa(binary)
+    const mediaType = imgResp.headers.get('content-type') || 'image/jpeg'
+
+    const prompt = `This is a photo of a "Dandara Homes Ltd — Subcontractor Summary Sheet" timesheet. It has an Operative name, a Week Ending date, and a Site at the top, then one row per weekday (Mon, Tue, Wed, Thu, Fri, Sat) with columns: Daywork (a free-text description, sometimes written across two lines), Plot/Area, Start, Finish, Hours.
+
+Read ONLY the row labelled "${weekday}". Use the Operative name and Week Ending date at the top just for your own reference, don't return them.
+
+Respond with ONLY a JSON object, no other text before or after it, in exactly this shape:
+{
+  "start": string or null (24-hour "HH:MM"),
+  "finish": string or null (24-hour "HH:MM"),
+  "description": string or null,
+  "confident": boolean (true only if you are genuinely confident in every field you're returning),
+  "uncertainNote": string or null (a short plain-English note about anything ambiguous, e.g. "Finish time could be 16:30 or 16:50" — or null if there's nothing to flag)
+}
+
+If the "${weekday}" row is blank or doesn't exist on this sheet, return start/finish/description as null, confident: false, and explain why in uncertainNote. Never guess a value you can't actually read on the page — return null for that field instead and say so in uncertainNote.`
+
+    const aiResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': anthropicKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 1024,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+            { type: 'text', text: prompt },
+          ],
+        }],
+      }),
+    })
+
+    const aiJson = await aiResp.json()
+    if (!aiResp.ok) {
+      return new Response(JSON.stringify({ ok: false, error: aiJson?.error?.message || 'Claude API call failed', stage: 'anthropic call' }), {
+        status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    const text = (aiJson.content || []).map((c: any) => c.text || '').join('')
+    let parsed
+    try {
+      const match = text.match(/\{[\s\S]*\}/)
+      parsed = JSON.parse(match ? match[0] : text)
+    } catch (e) {
+      return new Response(JSON.stringify({ ok: false, error: "Could not parse Claude's response as JSON", raw: text }), {
+        status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    return new Response(JSON.stringify({ ok: true, ...parsed }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  } catch (err) {
+    return new Response(JSON.stringify({ ok: false, error: String((err && err.message) || err) }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+})
+```
+
+Wired up in the internal app now (`dgc-ballasalla/planner/dayworks.html`'s "Re-read from photo" button) — it'll show "Could not read the photo" with the real error until this is deployed and the secret is set.
+
 ## New table needed: `dgc_dayworks_payments`
 
 Backs the "Total paid so far" figure on the public page. Run this once in the Job Planner's Supabase SQL Editor:
